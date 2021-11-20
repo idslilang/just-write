@@ -26,12 +26,22 @@ TinyLFU 算法：
 
 
 
-W-TinyLFU算法：
+#### 内部结构
 
-![img](https://mtp.myoas.com/docrest/file/downloadfile/4c28dc4ba68f882c8a55aea1?big)
+- Cache    的内部包含着一个ConcurrentHashMap，这也是存放我们所有缓存数据的地方，众所周知，ConcurrentHashMap是一个并发安全的容器，这点很重要，可以说Caffeine其实就是一个被强化过的ConcurrentHashMap。
+- Scheduler 定期清空数据的一个机制，可以不设置，如果不设置则不会主动的清空过期数据。
+- Executor 指定运行异步任务时要使用的线程池。可以不设置，如果不设置则会使用默认的线程池，也就是ForkJoinPool.commonPool()
 
-W-TinyLFU（Windows-TinyLFU）：W-TinyLFU 又是 TinyLFU 的改进版本。TinyLFU 在实现减少计数器维护频率的同时，也带来了无法很好地应对稀疏突发访问的问题，所谓稀疏突发访问是指有一些绝对频率较小，但突发访问频率很高的数据，此时 TinyLFU 就很难让这类元素通过 Sketch 的过滤，因为它们无法在运行期间积累到足够高的频率。应对短时间的突发访问是 LRU 的强项，W-TinyLFU 就结合了 LRU 和 LFU 两者的优点，从整体上看是它是 LFU 策略，从局部实现上看又是 LRU 策略。具体做法是将新记录暂时放入一个名为 Window Cache 的前端 LRU 缓存里面，让这些对象可以在 Window Cache 中累积热度，如果能通过 TinyLFU 的过滤器，再进入名为 Main Cache 的主缓存中存储，主缓存根据数据的访问频繁程度分为不同的段（LFU 策略，实际上 W-TinyLFU 只分了两段），但单独某一段局部来看又是基于 LRU 策略去实现的（称为 Segmented LRU）。每当前一段缓存满了之后，会将低价值数据淘汰到后一段中去存储，直至最后一段也满了之后，该数据就彻底清理出缓存。
+#### Caffeine提供的能力
 
+1. 自动把数据加载到本地缓存中，并且可以配置异步；
+2. 基于数量剔除策略；
+3. 基于失效时间剔除策略，这个时间是从最后一次操作算起【访问或者写入】；
+4. 异步刷新；
+5. Key会被包装成Weak引用；Value会被包装成Weak或者Soft引用，从而能被GC掉，而不至于内存泄漏；
+6. 数据剔除提醒；
+7. 写入广播机制；
+8. 缓存访问可以统计；
 
 
 #### 1.3.1  常用配置参数
@@ -39,7 +49,7 @@ W-TinyLFU（Windows-TinyLFU）：W-TinyLFU 又是 TinyLFU 的改进版本。Tiny
 ```
 expireAfterWrite：写入间隔多久淘汰；
 expireAfterAccess：最后访问后间隔多久淘汰；
-refreshAfterWrite：写入后间隔多久刷新，当加载不到新数据采用旧数据时便可设置此参数。
+refreshAfterWrite：写入后间隔多久刷新，实现异步加载数据。
 maximumSize：缓存 key 的最大个数；
 softValues：value设置为软引用，在内存溢出前可以直接淘汰；
 executor：选择自定义的线程池，默认的线程池实现是 ForkJoinPool.commonPool()；
@@ -47,111 +57,347 @@ recordStats：缓存的统计数据，比如命中率等；
 removalListener：缓存淘汰监听器；
 ```
 
-#### 1.3.2  同步加载数据
+#### 1.3.2  手动加载数据
 
 **实战代码：**
 
 ```
-public class AdsPreCheckConfigListCache {
-    private static Logger LOGGER = LoggerFactory.getLogger(AdsPreCheckConfigListCache.class);
+public class CaffeineManualTest {
 
-    private LoadingCache<Integer, String> cache = null;
+    public static void main(String[] args)  {
+        // 初始化缓存，设置了1分钟的写过期，100的缓存最大个数
+        Cache<Integer, Integer> cache = Caffeine.newBuilder()
+                .expireAfterWrite(1, TimeUnit.MINUTES)
+                .maximumSize(100)
+                .build();
+        int key = 1;
+        // 使用getIfPresent方法从缓存中获取值。如果缓存中不存指定的值，则方法将返回 null：
+        System.out.println(cache.getIfPresent(key));
 
-    /**
-     * @description 初始化caffine
-     * @author idslilang 
-     * @updateTime 2021/6/2 14:48
-     * @Return
-     */
-    public void init() {
-
-        this.cache = Caffeine.newBuilder().initialCapacity(3000).maximumSize(10000)
-                .refreshAfterWrite(1,TimeUnit.SECONDS)
-                .expireAfterWrite(1, TimeUnit.SECONDS)
-                .executor(ThreadPoolUtils.getThreadPoolExecutor())
-                .recordStats()
-                .build(initLoader());
-
-    }
-
-    public LoadingCache<Integer, String> getCache(){
-        return cache;
-    }
-
-    private CacheLoader<Integer, String> initLoader() {
-        return new CacheLoader<Integer, String>() {
-
+        // 也可以使用 get 方法获取值，该方法将一个参数为 key 的 Function 作为参数传入。如果缓存中不存在该 key
+        // 则该函数将用于提供默认值，该值在计算后插入缓存中：
+        System.out.println(cache.get(key, new Function<Integer, Integer>() {
             @Override
-            public @Nullable String load(@NonNull Integer integer) throws Exception {
-                System.out.println("i come load---->" + integer);
-                return String.valueOf("load---->"+integer);
+            public Integer apply(Integer integer) {
+                return 2;
             }
+        }));
 
-            @Override
-            public @Nullable String reload(@NonNull Integer key, @NonNull String oldValue) throws Exception {
+        // 校验key1对应的value是否插入缓存中
+        System.out.println(cache.getIfPresent(key));
 
-                System.out.println("i come reload---->" + oldValue);
-                return String.valueOf("reload---->"+key);
+        // 手动put数据填充缓存中
+        int value1 = 2;
+        cache.put(key, value1);
 
-            }
-        };
-    }
+        // 使用getIfPresent方法从缓存中获取值。如果缓存中不存指定的值，则方法将返回 null：
+        System.out.println(cache.getIfPresent(key));
 
-    public Object get(Integer bizId){
-        return cache.get(bizId);
-    }
-
-    public static void main(String[] args) throws InterruptedException, TimeoutException, ExecutionException {
-        AdsPreCheckConfigListCache cache = new AdsPreCheckConfigListCache();
-        cache.init();
-        while (true){
-            cache.get(1);
-            TimeUnit.SECONDS.sleep(1);
-        }
-
+        // 移除数据，让数据失效
+        cache.invalidate(key);
+        System.out.println(cache.getIfPresent(key));
     }
 }
 ```
 
-**输出结果：**
+上面提到了两个get数据的方式，一个是getIfPercent，没数据会返回Null，而get数据的话则需要提供一个Function对象，当缓存中不存在查询的key则将该函数用于提供默认值，并且会插入缓存中。当多个线程同时get的时候，由于Caffeine内部最主要的数据结构就是一个ConcurrentHashMap，而get的过程最终执行的便是ConcurrentHashMap.compute，这里仅会被执行一次。
 
-```
-i come load---->1
-i come load---->1
-i come load---->1
-i come load---->1
-i come load---->1
-i come load---->1
-```
 
-**当cache如下时：**
-
-```
-      this.cache = Caffeine.newBuilder().initialCapacity(3000).maximumSize(10000)
-                .refreshAfterWrite(1,TimeUnit.SECONDS)
-                .expireAfterWrite(3, TimeUnit.SECONDS)
-                .executor(ThreadPoolUtils.getThreadPoolExecutor())
-                .recordStats()
-                .build(initLoader());
-```
 
 **输出结果：**
 
 ```
-load---->1
-load---->1
-reload---->1
-reload---->1
-reload---->1
-reload---->1
-reload---->1
-reload---->1
-reload---->1
+null
+2
+2
+2
+null
+```
+
+#### 1.3.3  同步加载数据
+
+```
+public class CaffeineManualTest {
+
+    LoadingCache<Integer, Integer> cache = Caffeine.newBuilder()
+            .expireAfterWrite(1, TimeUnit.MINUTES)
+            .maximumSize(100)
+            .build(new CacheLoader<Integer, Integer>() {
+                @Nullable
+                @Override
+                public Integer load(@NonNull Integer key) throws InterruptedException {
+                    System.out.println(Thread.currentThread().getName());
+                    TimeUnit.SECONDS.sleep(10);
+                    // 可以从数据库加载值
+                    return 1232;
+                }
+            });
+
+    public void getCache(){
+        // 初始化缓存，设置了1分钟的写过期，100的缓存最大个数
+        int key1 = 1;
+        // get数据，取不到则从数据库中读取相关数据，该值也会插入缓存中：
+        Integer value1 = cache.get(key1);
+        System.out.println(value1);
+    }
+    public static void main(String[] args)  {
+        new CaffeineManualTest().getCache();
+    }
+}
+```
+
+同步加载数据指的是，在get不到数据时最终会调用build构造时提供的CacheLoader对象中的load函数，如果返回值则将其插入缓存中，并且返回，这是一种同步的操作。
+
+
+
+输出结果：
+
+```
+main //主线程
+1232
 ```
 
 
 
- **监听过期数据**
+#### 1.3.4 异步加载数据
+
+**第一种方式：**
+
+目前异步加载数据在配置refreshAfterWrite后可以实现异步去加载，不过第一次加载会被阻塞。因为同步去获取数据，后续结果就会采用异步去进行刷新。
+
+```
+public class CaffeineManualTest {
+
+    LoadingCache<Integer, Integer> cache = Caffeine.newBuilder()
+            .expireAfterWrite(3, TimeUnit.SECONDS)
+            .refreshAfterWrite(1, TimeUnit.SECONDS)
+            .maximumSize(100)
+            .build(new CacheLoader<Integer, Integer>() {
+                @Nullable
+                @Override
+                public Integer load(@NonNull Integer key) throws InterruptedException {
+                    System.out.println(Thread.currentThread().getName());
+                    TimeUnit.SECONDS.sleep(10);
+                    // 可以从数据库加载值
+                    return 1232;
+                }
+            });
+
+    public void getCache() throws InterruptedException {
+        while (true) {
+            // 初始化缓存，设置了1分钟的写过期，100的缓存最大个数
+            int key1 = 1;
+            // get数据，取不到则从数据库中读取相关数据，该值也会插入缓存中：
+            Integer value1 = cache.get(key1);
+
+            System.out.println(value1);
+            TimeUnit.SECONDS.sleep(2);
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        new CaffeineManualTest().getCache();
+    }
+}
+```
+
+加入refreshAfterWrite后，当第一次写过写入到缓存以后，后续读取值将会采用异步刷新的方式去读取数据，复制代码亲自测试能更好理解
+
+输出结果：
+
+```
+main 
+1232 --会被阻塞十秒才能获取到值
+ForkJoinPool.commonPool-worker-19
+1232--不会被阻塞，获取缓存值，load异步去加载数据，下一次读取新的数据，如果重写了reload方法，则会执行reload去加载数据
+1232
+1232
+1232
+1232
+1232
+1232
+ForkJoinPool.commonPool-worker-5
+```
+
+ 重写reload：
+
+```
+public class CaffeineManualTest {
+
+    LoadingCache<Integer, Integer> cache = Caffeine.newBuilder()
+            .expireAfterWrite(3, TimeUnit.SECONDS)
+            .refreshAfterWrite(1, TimeUnit.SECONDS)
+            .maximumSize(100)
+            .build(new CacheLoader<Integer, Integer>() {
+                @Nullable
+                @Override
+                public Integer load(@NonNull Integer key) throws InterruptedException {
+                    System.out.println(Thread.currentThread().getName());
+                    TimeUnit.SECONDS.sleep(10);
+                    // 可以从数据库加载值
+                    return 1232;
+                }
+
+                @Nullable
+                @Override
+                public Integer reload(@NonNull Integer key, @NonNull Integer oldValue) throws Exception {
+                    System.out.println(Thread.currentThread().getName());
+                    TimeUnit.SECONDS.sleep(10);
+                    return 33333;
+                }
+            });
+
+    public void getCache() throws InterruptedException {
+        while (true) {
+            // 初始化缓存，设置了1分钟的写过期，100的缓存最大个数
+            int key1 = 1;
+            // get数据，取不到则从数据库中读取相关数据，该值也会插入缓存中：
+            Integer value1 = cache.get(key1);
+
+            System.out.println(value1);
+            TimeUnit.SECONDS.sleep(2);
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        new CaffeineManualTest().getCache();
+    }
+}
+```
+
+输出结果：
+
+```
+main 主线程加载数据，阻塞
+1232 获取到主线程的数据
+ForkJoinPool.commonPool-worker-19 异步去加载数据，被sleep阻塞
+1232 读取缓存值
+1232 读取缓存值
+1232 读取缓存值
+1232 读取缓存值
+1232 读取缓存值
+33333 读到reload加载的数据
+33333 读取缓存值
+ForkJoinPool.commonPool-worker-5 
+33333
+33333
+33333
+33333
+33333
+33333
+ForkJoinPool.commonPool-worker-19
+33333
+```
+
+
+
+future 获取数据的时候，不是主动去进行加载数据的，都是等到调用的时候才去主动加载，因此，对于缓存数据来说，当前拿到的值不是最新的，会去异步加载数据，下次调用获取最新值。
+
+
+
+**第二种方式：**
+
+```
+public class CaffeineManualTest {
+
+    // 使用executor设置线程池
+    AsyncCache<Integer, Integer> asyncCache = Caffeine.newBuilder()
+            .expireAfterWrite(1, TimeUnit.MINUTES)
+            .maximumSize(100).executor(Executors.newSingleThreadExecutor()).buildAsync();
+
+    public CompletableFuture<Integer>  getCache(Integer key)  {
+      return  asyncCache.get(key, new Function<Integer, Integer>() {
+            @SneakyThrows
+            @Override
+            public Integer apply(Integer key) {
+                // 执行所在的线程不在是main，而是ForkJoinPool线程池提供的线程
+                System.out.println("当前所在线程：" + Thread.currentThread().getName());
+                try {
+                    TimeUnit.SECONDS.sleep(10);
+                }catch (Exception ex){}
+                int value =12121212;
+                return value;
+            }
+        });
+    }
+
+    public static void main(String[] args) throws InterruptedException, ExecutionException, TimeoutException {
+        CompletableFuture<Integer> integerCompletableFuture = new CaffeineManualTest().getCache(1);
+
+        System.out.println("先做点别的事情");
+
+        TimeUnit.SECONDS.sleep(5);
+
+        System.out.println(integerCompletableFuture.get(5,TimeUnit.SECONDS));//最多等待五秒，加上之前等待的5秒，因此异步加载数据不会超时
+    }
+}
+```
+
+输出结果：
+
+```
+当前所在线程：pool-1-thread-1
+先做点别的事情
+12121212
+```
+
+
+
+超时演示：
+
+```
+public class CaffeineManualTest {
+
+    // 使用executor设置线程池
+    AsyncCache<Integer, Integer> asyncCache = Caffeine.newBuilder()
+            .expireAfterWrite(1, TimeUnit.MINUTES)
+            .maximumSize(100).executor(Executors.newSingleThreadExecutor()).buildAsync();
+
+    public CompletableFuture<Integer>  getCache(Integer key)  {
+      return  asyncCache.get(key, new Function<Integer, Integer>() {
+            @SneakyThrows
+            @Override
+            public Integer apply(Integer key) {
+                // 执行所在的线程不在是main，而是ForkJoinPool线程池提供的线程
+                System.out.println("当前所在线程：" + Thread.currentThread().getName());
+                try {
+                    TimeUnit.SECONDS.sleep(10);
+                }catch (Exception ex){}
+                int value =12121212;
+                return value;
+            }
+        });
+    }
+
+    public static void main(String[] args) throws InterruptedException, ExecutionException, TimeoutException {
+        CompletableFuture<Integer> integerCompletableFuture = new CaffeineManualTest().getCache(1);
+
+        System.out.println("先做点别的事情");
+
+        TimeUnit.SECONDS.sleep(5);
+
+        System.out.println(integerCompletableFuture.get(2,TimeUnit.SECONDS));
+    }
+}
+```
+
+输出结果：
+
+```
+当前所在线程：pool-1-thread-1
+先做点别的事情
+Exception in thread "main" java.util.concurrent.TimeoutException
+	at java.base/java.util.concurrent.CompletableFuture.timedGet(CompletableFuture.java:1886)
+	at java.base/java.util.concurrent.CompletableFuture.get(CompletableFuture.java:2021)
+	at com.idslilang.go.CaffeineManualTest.main(CaffeineManualTest.java:45)
+
+```
+
+
+
+https://segmentfault.com/a/1190000038665523
+
+**监听过期数据**
 
 ```
   this.cache = Caffeine.newBuilder().initialCapacity(3000).maximumSize(10000)
@@ -203,7 +449,6 @@ reload---->1
 #### 1.3.3 异步加载数据
 
 ```
-
 public class AdsPreCheckConfigListCache {
     private static Logger LOGGER = LoggerFactory.getLogger(AdsPreCheckConfigListCache.class);
 
@@ -335,22 +580,13 @@ public static <U> CompletableFuture<U> supplyAsync(Supplier<U> supplier, Executo
 DEMO：
 
 ```
-public CompletableFuture<String> getCompletableFutureData(){
-    CompletableFuture<String> completableFuture = CompletableFuture.supplyAsync(()->{
-        return  "return world";
-    }, executor);
-    return  completableFuture;
-}
+public CompletableFuture<String> getCompletableFutureData(){    CompletableFuture<String> completableFuture = CompletableFuture.supplyAsync(()->{        return  "return world";    }, executor);    return  completableFuture;}
 ```
 
 
 
 ```
-public void runAsync(){
-    CompletableFuture.runAsync(()->{
-       //do something async
-    }, executor);;
-}
+public void runAsync(){    CompletableFuture.runAsync(()->{       //do something async    }, executor);;}
 ```
 
 
@@ -358,9 +594,7 @@ public void runAsync(){
 ##### 2.2.2 设置任务结果
 
 ```
-public boolean complete(T value);
-public boolean completeExceptionally(Throwable ex);
-CompletableFuture.completedFuture();
+public boolean complete(T value);public boolean completeExceptionally(Throwable ex);CompletableFuture.completedFuture();
 ```
 
 设置结果DEMO1：
@@ -583,14 +817,7 @@ public void runAsync() {
 ##### 2.2.5 OR执行关系
 
 ```
-//等待任何一个对象执行完毕，获取返回结果
-CompletableFuture#acceptEither
-
-//等待任何对象执行完毕，不获取返回结果
-CompletableFuture#runAfterEither
-
-//所有future对象执行完毕，不获取返回结果
-CompletableFuture#anyOf
+//等待任何一个对象执行完毕，获取返回结果CompletableFuture#acceptEither//等待任何对象执行完毕，不获取返回结果CompletableFuture#runAfterEither//所有future对象执行完毕，不获取返回结果CompletableFuture#anyOf
 ```
 
 代码DEMO：
