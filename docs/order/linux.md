@@ -111,12 +111,62 @@ cat ：输出当前文件内容。
 用于查看文件的内容。通常比如说我们需要查看正在变动的日志文件，那就可以用这个命令了。
 
 - 扩展：`tail -f filename`，会把 filename 文件里的最尾部的内容显示出来，并且不断刷新，只要 filename 更新就可以看到最新的文件内容。
-
 - 扩展：`tail -20f filename`，会把 filename 文件里的最后的20行内容显示出来，并且不断刷新。
-
 - 扩展：`tail -c 20 filename`，显示文件 filename 的最后 20 个字符。
-
 - 扩展：`tail -n +20 filename`，显示文件 filename 的内容，从第 20 行至文件末尾。
 
-   
+
+
+#### 12. 负载命令
+
+负载是对当前CPU的工作量的一个度量，通常负载越低，说明机器工作轻松，反之则越累，高负载的情况下就可能会出现机器无法处理其他的业务请求了。
+
+
+
+查看负载的命令有很多，top、uptime 最常用
+
+
+
+##### 12.1 uptime
+
+```
+ 8:09  up 7 days, 25 mins, 2 users, load averages: 3.50 4.69 5.76
+```
+
+load average：0.39, 0.34, 0.39  这三个数字的意思分别是1分钟、5分钟、15分钟内系统的平均负荷
+
+user：2 user，当前两个用户登入前面显示的信息就是服务器启动到现在已经有多长时间了。
+
+##### 12.2 top
+
+```
+$top
+top - 01:19:56 up 319 days, 14:11,  1 user,  load average: 0.13, 0.25, 0.35
+Tasks: 145 total,   1 running, 144 sleeping,   0 stopped,   0 zombie
+%Cpu(s):  2.8 us,  0.9 sy,  0.3 ni, 95.6 id,  0.1 wa,  0.0 hi,  0.2 si,  0.2 st
+KiB Mem :  8173324 total,   142188 free,  5861548 used,  2169588 buff/cache
+KiB Swap:        0 total,        0 free,        0 used.  1634952 avail Mem
+
+  PID USER      PR  NI    VIRT    RES    SHR S  %CPU %MEM     TIME+ COMMAND
+ 7704 www       20   0 9714024 4.824g   5932 S  27.6 61.9   3717:34 java
+ 2150 root      30  10  785008  58672  35804 S   1.7  0.7   3254:22 polaris-agent
+16043 www       20   0 3800732 402604   3788 S   0.3  4.9 603:29.85 java
+    1 root      20   0   43536   3396   1948 S   0.0  0.0  56:12.32 systemd
+```
+
+一般来说只要负载超过0.7可能就表示当前负载有点高了，需要排查一下，这个是针对单核CPU来说的，如果是多核CPU来说，我们就是CPU核数乘以0.7来计算的。
+
+
+
+在top显示的进程信息的时候，我们可能看到当前进程中 140这个进程占用CPU最高。我们可以看看这个进程下的线程在做什么。
+
+
+
+##### 12.3 
+
+
+
+#### 13. CPU命令
+
+
 
